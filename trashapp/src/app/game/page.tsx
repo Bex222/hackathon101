@@ -242,7 +242,7 @@ export default function ImpactPage() {
             <label key={idx} className="flex items-center gap-2 cursor-pointer">
               <input
                 type="radio"
-                name={question-${currentQuestionIndex}}
+                name={`question-${currentQuestionIndex}`}
                 value={opt.value}
                 checked={answers[currentQuestionIndex] === opt.value}
                 onChange={() => handleOptionChange(opt.value)}
