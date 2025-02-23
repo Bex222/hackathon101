@@ -7,11 +7,13 @@ interface Task {
   id: string;
   description: string;
   done: boolean;
+  selected?: boolean; // Used during challenge selection
 }
 
 interface DayTracker {
   day: number;
   tasks: Task[];
+  confirmed: boolean; // Whether the challenges for the day have been confirmed
 }
 
 const tasksByCategory: Record<string, string[]> = {
@@ -28,7 +30,8 @@ export default function TrackerPage() {
   const [trackerData, setTrackerData] = useState<DayTracker[]>([]);
   const [surveyResults, setSurveyResults] = useState<number[] | null>(null);
   const [overallProgress, setOverallProgress] = useState(0);
-  const [strikes, setStrikes] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [showImpact, setShowImpact] = useState(false);
 
   // Load survey results from localStorage on mount
   useEffect(() => {
@@ -39,12 +42,9 @@ export default function TrackerPage() {
     }
   }, []);
 
-  // Generate tasks for the tracker based on survey results
-  useEffect(() => {
-    if (!surveyResults) return;
-
-    // Our survey covers 7 categories in this order:
-    // [Waste Management, Transportation, Food Purchasing, Household Products, Food Waste, Electronics Disposal, Packaging]
+  // Generate tasks based on survey results
+  const generateTasks = () => {
+    if (!surveyResults) return [];
     const categoryKeys = [
       "Waste Management",
       "Transportation",
@@ -54,9 +54,7 @@ export default function TrackerPage() {
       "Electronics Disposal",
       "Packaging",
     ];
-    // For each category, if the answer is greater than 1 (i.e. needs improvement), add its tasks.
-    const improvementCategories = categoryKeys.filter((_, idx) => surveyResults[idx] > 1);
-
+    const improvementCategories = categoryKeys.filter((_, idx) => surveyResults[idx] >= 3);
     let tasks: string[] = [];
     improvementCategories.forEach((cat) => {
       const catTasks = tasksByCategory[cat];
@@ -64,26 +62,72 @@ export default function TrackerPage() {
         tasks = tasks.concat(catTasks);
       }
     });
-    // If the user is already doing great (no improvement tasks), provide a default task.
     if (tasks.length === 0) {
       tasks = ["Maintain your great habits", "Share your sustainability tips with others"];
     }
+    // Return task objects with default flags
+    return tasks.map((desc, index) => ({
+      id: `${Date.now()}-${index}`, // Unique id based on timestamp and index
+      description: desc,
+      done: false,
+      selected: false,
+    }));
+  };
 
-    // Create tracker data for 30 days; each day will have the same set of tasks (all initially not done).
-    const data: DayTracker[] = [];
-    for (let day = 1; day <= 30; day++) {
-      const dayTasks = tasks.map((desc, index) => ({
-        id: `${day}-${index}`,
-        description: desc,
-        done: false,
-      }));
-      data.push({ day, tasks: dayTasks });
+  // Initialize trackerData with one day if surveyResults exist and no day has been created yet
+  useEffect(() => {
+    if (surveyResults && trackerData.length === 0) {
+      const tasks = generateTasks();
+      const initialDay: DayTracker = { day: 1, tasks: tasks, confirmed: false };
+      setTrackerData([initialDay]);
     }
-    setTrackerData(data);
   }, [surveyResults]);
 
-  // Toggle a task's completion state for a given day
-  const toggleTask = (dayIndex: number, taskId: string) => {
+  // Compute overall progress using confirmed days only
+  const computeProgress = (data: DayTracker[]) => {
+    let totalTasks = 0;
+    let completedTasks = 0;
+    data.forEach((day) => {
+      if (day.confirmed) {
+        totalTasks += day.tasks.length;
+        completedTasks += day.tasks.filter((task) => task.done).length;
+      }
+    });
+    return totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0;
+  };
+
+  // Compute streak using only confirmed days.
+  // The streak is the count of consecutive successful confirmed days (i.e. >=50% tasks done)
+  // from the latest confirmed day backwards. If there is no confirmed day, or the last confirmed day
+  // is unsuccessful, the streak is 0.
+  const computeStreak = (data: DayTracker[]) => {
+    // Only consider confirmed days
+    const confirmedDays = data.filter((day) => day.confirmed);
+    if (confirmedDays.length === 0) return 0;
+
+    let currentStreak = 0;
+    // Start from the latest confirmed day and count backwards
+    for (let i = confirmedDays.length - 1; i >= 0; i--) {
+      const day = confirmedDays[i];
+      const success = day.tasks.filter((t) => t.done).length >= day.tasks.length / 2;
+      if (success) {
+        currentStreak++;
+      } else {
+        break;
+      }
+    }
+    return currentStreak;
+  };
+
+  // Recalculate overall progress and streak when trackerData changes
+  useEffect(() => {
+    const progress = computeProgress(trackerData);
+    setOverallProgress(progress);
+    setStreak(computeStreak(trackerData));
+  }, [trackerData]);
+
+  // Toggle task completion (for confirmed days)
+  const toggleTaskCompletion = (dayIndex: number, taskId: string) => {
     const updatedData = trackerData.map((day, idx) => {
       if (idx === dayIndex) {
         return {
@@ -96,29 +140,58 @@ export default function TrackerPage() {
       return day;
     });
     setTrackerData(updatedData);
-    calculateProgress(updatedData);
   };
 
-  // Calculate overall progress and strike count
-  const calculateProgress = (data: DayTracker[]) => {
-    const totalTasks = data.reduce((sum, day) => sum + day.tasks.length, 0);
-    const completedTasks = data.reduce(
-      (sum, day) => sum + day.tasks.filter((task) => task.done).length,
-      0
-    );
-    const progress = totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0;
-    setOverallProgress(progress);
-
-    // Define strikes as days with less than 50% tasks completed
-    const strikeCount = data.filter(
-      (day) => day.tasks.filter((task) => task.done).length < day.tasks.length / 2
-    ).length;
-    setStrikes(strikeCount);
+  // Toggle task selection during the challenge selection phase for the current day
+  const toggleTaskSelection = (taskId: string) => {
+    const currentDayIndex = trackerData.length - 1;
+    const updatedData = trackerData.map((day, idx) => {
+      if (idx === currentDayIndex && !day.confirmed) {
+        return {
+          ...day,
+          tasks: day.tasks.map((task) =>
+            task.id === taskId ? { ...task, selected: !task.selected } : task
+          ),
+        };
+      }
+      return day;
+    });
+    setTrackerData(updatedData);
   };
 
-  useEffect(() => {
-    calculateProgress(trackerData);
-  }, [trackerData]);
+  // Confirm the challenge selection for the current day
+  const confirmChallenges = () => {
+    const currentDayIndex = trackerData.length - 1;
+    const currentDay = trackerData[currentDayIndex];
+    const selectedTasks = currentDay.tasks.filter((task) => task.selected);
+    if (selectedTasks.length === 0) {
+      alert("Please select at least one challenge for today.");
+      return;
+    }
+    const updatedDay: DayTracker = {
+      ...currentDay,
+      confirmed: true,
+      // Keep only the selected tasks for the day
+      tasks: selectedTasks.map((task) => ({ ...task, done: false })),
+    };
+    const updatedTracker = [...trackerData];
+    updatedTracker[currentDayIndex] = updatedDay;
+    setTrackerData(updatedTracker);
+  };
+
+  // Add a new day to the tracker
+  const addNewDay = () => {
+    const newDayNumber = trackerData.length + 1;
+    const tasks = generateTasks();
+    const newDay: DayTracker = { day: newDayNumber, tasks: tasks, confirmed: false };
+    setTrackerData([...trackerData, newDay]);
+  };
+
+  // Display all days; all previous days remain visible and affect progress/streak.
+  const displayedDays = trackerData;
+
+  // Calculate trees planted for the impact description (1 tree per 10% progress)
+  const treesPlanted = Math.floor(overallProgress / 10);
 
   if (!surveyResults) {
     return (
@@ -138,11 +211,19 @@ export default function TrackerPage() {
         <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
           <h2 className="text-xl font-bold mb-2">Learn More About Your Impact</h2>
           <p className="text-sm text-gray-600 dark:text-gray-300">
-            Discover how your daily habits affect the environment and learn actionable tips to improve your sustainability.
+            Discover how your daily habits affect the environment.
           </p>
-          <Link href="/learn-more" className="mt-2 inline-block px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded">
+          <button
+            onClick={() => setShowImpact(!showImpact)}
+            className="mt-2 inline-block px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded"
+          >
             Learn More
-          </Link>
+          </button>
+          {showImpact && (
+            <div className="mt-4 p-4 bg-green-100 text-green-800 rounded">
+              Your efforts are equivalent to planting {treesPlanted} tree{treesPlanted !== 1 ? "s" : ""}!
+            </div>
+          )}
         </div>
         <div className="bg-white dark:bg-gray-800 p-4 rounded shadow flex justify-around items-center">
           <div>
@@ -150,8 +231,8 @@ export default function TrackerPage() {
             <p className="text-sm text-gray-600 dark:text-gray-300">Tasks Completed</p>
           </div>
           <div>
-            <p className="text-lg font-bold">{strikes}</p>
-            <p className="text-sm text-gray-600 dark:text-gray-300">Strike(s)</p>
+            <p className="text-lg font-bold">{streak}</p>
+            <p className="text-sm text-gray-600 dark:text-gray-300">Streak</p>
           </div>
           <div>
             <Link href="/game" className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded">
@@ -161,34 +242,80 @@ export default function TrackerPage() {
         </div>
       </div>
 
-      {/* Tracker Grid */}
-      <h2 className="text-2xl font-bold mb-4 text-center">30-Day Sustainability Tracker</h2>
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-        {trackerData.map((day, index) => (
-          <div key={day.day} className="bg-white dark:bg-gray-800 p-4 rounded shadow">
-            <h3 className="font-bold mb-2">Day {day.day}</h3>
-            <ul>
-              {day.tasks.map((task) => (
-                <li key={task.id} className="flex items-center mb-1">
-                  <input
-                    type="checkbox"
-                    checked={task.done}
-                    onChange={() => toggleTask(index, task.id)}
-                    className="mr-2 accent-green-600"
-                  />
-                  <span className={task.done ? "line-through" : ""}>{task.description}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+      {/* Tracker Days */}
+      <h2 className="text-2xl font-bold mb-4 text-center">Sustainability Tracker</h2>
+      <div className="space-y-8">
+        {displayedDays.map((day, index) => {
+          // Only the latest day is editable.
+          const isCurrentDay = index === trackerData.length - 1;
+          return (
+            <div key={day.day} className="bg-white dark:bg-gray-800 p-4 rounded shadow">
+              <h3 className="font-bold mb-2">Day {day.day}</h3>
+              {isCurrentDay && !day.confirmed ? (
+                // Challenge selection interface for the current day
+                <div>
+                  <p className="mb-2">Select the challenges you want to complete today:</p>
+                  <ul>
+                    {day.tasks.map((task) => (
+                      <li key={task.id} className="flex items-center mb-1">
+                        <input
+                          type="checkbox"
+                          checked={task.selected || false}
+                          onChange={() => toggleTaskSelection(task.id)}
+                          className="mr-2 accent-green-600"
+                        />
+                        <span>{task.description}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    onClick={confirmChallenges}
+                    className="mt-2 px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded"
+                  >
+                    Submit Challenges
+                  </button>
+                </div>
+              ) : (
+                // Display tasks; checkboxes enabled only for the current day.
+                <ul>
+                  {day.tasks.map((task) => (
+                    <li key={task.id} className="flex items-center mb-1">
+                      <input
+                        type="checkbox"
+                        checked={task.done}
+                        onChange={() =>
+                          isCurrentDay
+                            ? toggleTaskCompletion(trackerData.length - 1, task.id)
+                            : null
+                        }
+                        className="mr-2 accent-green-600"
+                        disabled={!isCurrentDay}
+                      />
+                      <span className={task.done ? "line-through" : ""}>{task.description}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* New Day Button */}
+      <div className="mt-8 flex justify-center">
+        <button
+          onClick={addNewDay}
+          className="px-6 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded transition transform hover:scale-105"
+        >
+          New Day
+        </button>
       </div>
 
       {/* Overall Progress Footer */}
       <div className="mt-8 text-center">
         <p className="text-lg font-bold">Overall Completion: {overallProgress}%</p>
         <p className="text-sm text-gray-600 dark:text-gray-300">
-          Strike count (days with less than 50% tasks completed): {strikes}
+          Streak: {streak} day{streak !== 1 ? "s" : ""}
         </p>
       </div>
     </div>
